@@ -127,7 +127,9 @@ def _handle_disconnect_app(args: dict[str, Any], **_: Any) -> str:
 def _make_action_handler(action_name: str):
     def _handler(args: dict[str, Any], **_: Any) -> str:
         entity_id = bridge.current_entity_id()
-        text = bridge.execute(action_name, args or {}, entity_id)
+        ok, text = bridge.execute(action_name, args or {}, entity_id)
+        if not ok:
+            return tool_error(text)
         return tool_result(result=text)
 
     return _handler

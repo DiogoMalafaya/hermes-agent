@@ -343,11 +343,18 @@ def check_connection(entity_id: str, app_name: str) -> bool:
 # ----- execution -------------------------------------------------------------
 
 
-def execute(tool_name: str, args: dict, entity_id: str) -> str:
-    """Execute a Composio action. Returns a string suitable for the LLM."""
+def execute(tool_name: str, args: dict, entity_id: str) -> tuple[bool, str]:
+    """Execute a Composio action.
+
+    Returns ``(ok, text)`` where *text* is an LLM-ready string. ``ok`` is
+    ``False`` whenever the action could not be performed — misconfiguration,
+    transport error, or a Composio/Google API failure (e.g. a rejected
+    calendar insert). Callers must surface a real tool error in that case
+    rather than reporting success with the error buried in the body.
+    """
     _init()
     if not _composio_available:
-        return "Error: Composio is not configured (set COMPOSIO_API_KEY)."
+        return False, "Error: Composio is not configured (set COMPOSIO_API_KEY)."
 
     params = {k: v for k, v in (args or {}).items() if not k.startswith("_")}
     try:
@@ -358,22 +365,22 @@ def execute(tool_name: str, args: dict, entity_id: str) -> str:
         )
     except Exception as e:
         logger.exception("Composio tool %s failed", tool_name)
-        return f"Error executing {tool_name}: {e}"
+        return False, f"Error executing {tool_name}: {e}"
 
     if isinstance(result, dict):
         if result.get("error"):
-            return f"Error: {result['error']}"
+            return False, f"Error: {result['error']}"
         if result.get("successfull") is False or result.get("successful") is False:
             err = result.get("error") or result.get("data") or "Unknown error"
-            return f"Error: {tool_name} failed — {err}"
+            return False, f"Error: {tool_name} failed — {err}"
         payload = result.get("data", result)
     else:
         payload = result
 
     if isinstance(payload, dict) and payload.get("error"):
-        return f"Error: {payload['error']}"
+        return False, f"Error: {payload['error']}"
 
-    return _serialize_payload(tool_name, _unwrap(payload))
+    return True, _serialize_payload(tool_name, _unwrap(payload))
 
 
 # ----- human-readable helpers ------------------------------------------------

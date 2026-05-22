@@ -162,6 +162,15 @@ def _extract_doc_text(doc: dict) -> str:
 
 
 def _datetime_with_timezone(value: str) -> str:
+    """Ensure an ISO 8601 datetime carries a UTC offset.
+
+    The Calendar API rejects a ``dateTime`` with no offset ("Missing time
+    zone definition for valid date"), so a bare wall-clock string must be
+    qualified. We assume bare values are local time and attach the system's
+    offset for that date (DST-aware) so "3pm" stays 3pm rather than becoming
+    3pm UTC; values that already specify ``Z`` or a ``±HH:MM`` offset pass
+    through unchanged.
+    """
     if not value:
         return value
     if "T" not in value:
@@ -171,7 +180,10 @@ def _datetime_with_timezone(value: str) -> str:
     tail = value[10:]
     if "+" in tail or "-" in tail:
         return value
-    return value + "Z"
+    try:
+        return datetime.fromisoformat(value).astimezone().isoformat()
+    except ValueError:
+        return value + "Z"
 
 
 def get_credentials():
@@ -514,8 +526,8 @@ def calendar_list(args):
 def calendar_create(args):
     event = {
         "summary": args.summary,
-        "start": {"dateTime": args.start},
-        "end": {"dateTime": args.end},
+        "start": {"dateTime": _datetime_with_timezone(args.start)},
+        "end": {"dateTime": _datetime_with_timezone(args.end)},
     }
     if args.location:
         event["location"] = args.location
