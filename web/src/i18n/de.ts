@@ -74,6 +74,7 @@ export const de: Translations = {
       documentation: "Dokumentation",
       keys: "Schlüssel",
       logs: "Protokolle",
+      mcp: "MCP",
       models: "Modelle",
       profiles: "Profile : Multi-Agenten",
       plugins: "Plugins",

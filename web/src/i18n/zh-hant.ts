@@ -74,6 +74,7 @@ export const zhHant: Translations = {
       documentation: "文件",
       keys: "金鑰",
       logs: "日誌",
+      mcp: "MCP",
       models: "模型",
       profiles: "多代理設定檔",
       plugins: "外掛管理",

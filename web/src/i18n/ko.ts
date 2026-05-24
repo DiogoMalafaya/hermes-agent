@@ -74,6 +74,7 @@ export const ko: Translations = {
       documentation: "문서",
       keys: "키",
       logs: "로그",
+      mcp: "MCP",
       models: "모델",
       profiles: "프로필: 멀티 에이전트",
       plugins: "플러그인",
