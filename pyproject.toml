@@ -171,7 +171,7 @@ youtube = [
 ]
 # `hermes dashboard` (localhost SPA + API).  Not in core to keep the default install lean.
 web = ["fastapi==0.133.1", "uvicorn[standard]==0.41.0"]
-composio = ["composio-core>=0.7.0,<1"]
+composio = ["composio==1.0.0rc2"]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git@c20c85256e5a45ad31edf8b7276e9c5ee1995a30",
   "tinker @ git+https://github.com/thinking-machines-lab/tinker.git@30517b667f18a3dfb7ef33fb56cf686d5820ba2b",
@@ -268,10 +268,6 @@ preview = true  # required for PLW1514 (unspecified-encoding) — preview rule
 
 [tool.uv]
 exclude-newer = "7 days"
-# composio-core pins rich<14 conservatively; hermes pins rich>=14.3.3. The
-# APIs composio uses (Console, Progress) are backward-compatible across the
-# 13→14 bump, so force rich 14 everywhere instead of forking the dep tree.
-override-dependencies = ["rich>=14.3.3,<15"]
 
 [tool.ruff.lint]
 # All other lints are intentionally disabled (see comment history on this

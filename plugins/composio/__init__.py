@@ -54,12 +54,10 @@ def _handle_connect(args: dict[str, Any], **_: Any) -> str:
             message=f"{app} is already connected for entity '{entity_id}'.",
         )
 
-    url = bridge.initiate_connection(entity_id, app)
+    url, err = bridge.initiate_connection(entity_id, app)
     if not url:
         return tool_error(
-            f"Failed to start connection for '{app}'. Check that COMPOSIO_API_KEY "
-            "is set and the app name is a valid Composio app slug "
-            "(e.g. gmail, googlecalendar, slack, github, notion)."
+            f"Failed to start connection for '{app}': {err or 'no redirect URL returned'}"
         )
     return tool_result(
         status="pending",

@@ -4,12 +4,18 @@ Bridges Composio actions into the Hermes tool registry:
 
 * Tool handlers return JSON strings via ``tool_result`` / ``tool_error`` to
   match the hermes registry contract.
-* Entity identity is resolved from a ``ContextVar`` set by the plugin's
+* User identity is resolved from a ``ContextVar`` set by the plugin's
   ``pre_llm_call`` hook (so each gateway session gets its own Composio
-  entity), falling back to the ``COMPOSIO_DEFAULT_ENTITY`` env var, then
-  to ``"default"``.
+  user), falling back to the ``COMPOSIO_DEFAULT_ENTITY`` env var, then
+  to ``"default"``. Composio v0 called this an "entity"; v1 calls it a
+  "user". We kept the env-var name for backward compatibility with
+  existing deployments.
 * Action schemas are cached on disk under ``$HERMES_HOME/composio-cache/``
   so plugin load is fast after the first fetch.
+
+Built against composio v1 (package ``composio``, not the retired
+``composio-core`` v0). The v0 connected-accounts endpoint was sunset by
+Composio and returns HTTP 410, which is what motivated the v1 migration.
 """
 
 from __future__ import annotations
@@ -56,35 +62,40 @@ _APP_DESCRIPTIONS = {
 # ----- module state ----------------------------------------------------------
 
 
-_toolset = None
+_client = None  # composio.Composio v1 client
 _composio_available = False
 _init_attempted = False
 
-# tool name -> opaque Composio action reference. Populated as app schemas load.
+# tool name -> action slug (same string in v1; kept as a set-shaped map for
+# the is_composio_tool() membership check below).
 _action_map: dict[str, str] = {}
 
 # app name (lowercase) -> list[tool schema dict] (hermes registry shape).
 _app_schema_cache: dict[str, list[dict]] = {}
 
-# entity_id -> (timestamp, set[str]) connected-app cache.
+# user_id -> (timestamp, set[str]) connected-app cache.
 _connected_apps_cache: dict[str, tuple[float, set[str]]] = {}
 
 
-# Per-call entity override (set by the plugin's pre_llm_call hook from the
+# Per-call user override (set by the plugin's pre_llm_call hook from the
 # session's sender_id). Thread/task-safe via contextvars — each gateway
 # session's chain of tool calls runs in its own context.
 _current_entity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "composio_entity_id", default=None,
+    "composio_user_id", default=None,
 )
 
 
 def set_current_entity(entity_id: str | None) -> None:
-    """Called by the plugin's pre_llm_call hook once per turn."""
+    """Called by the plugin's pre_llm_call hook once per turn.
+
+    Kept named ``set_current_entity`` for callsite stability; the value is
+    the Composio v1 user_id.
+    """
     _current_entity.set(entity_id or None)
 
 
 def current_entity_id() -> str:
-    """Resolve the Composio entity id for the current call.
+    """Resolve the Composio user_id for the current call.
 
     Priority: ContextVar (set per-turn by pre_llm_call) → env var → "default".
     """
@@ -104,7 +115,7 @@ def is_available() -> bool:
 
 
 def _init() -> None:
-    global _toolset, _composio_available, _init_attempted
+    global _client, _composio_available, _init_attempted
     if _init_attempted:
         return
     _init_attempted = True
@@ -115,14 +126,14 @@ def _init() -> None:
         return
 
     try:
-        from composio import ComposioToolSet  # type: ignore[import-not-found]
-        _toolset = ComposioToolSet(api_key=api_key)
+        from composio import Composio  # type: ignore[import-not-found]
+        _client = Composio(api_key=api_key)
         _composio_available = True
-        logger.info("Composio initialized")
+        logger.info("Composio v1 client initialized")
     except ImportError:
         logger.warning(
-            "composio-core not installed — run `pip install 'hermes-agent[composio]'` "
-            "or `pip install composio-core` to enable external app tools"
+            "composio package not installed — run `pip install 'hermes-agent[composio]'` "
+            "or `pip install composio` to enable external app tools"
         )
     except Exception:
         logger.exception("Failed to initialize Composio")
@@ -213,6 +224,36 @@ def _write_disk_cache(app: str, schemas: list[dict]) -> None:
 # ----- schemas ---------------------------------------------------------------
 
 
+def _schema_from_tool(tool: Any) -> dict | None:
+    """Map a composio v1 ``Tool`` model to a hermes registry schema dict."""
+    slug = getattr(tool, "slug", None) or getattr(tool, "name", None)
+    if not slug:
+        return None
+    description = (
+        getattr(tool, "human_description", None)
+        or getattr(tool, "description", "")
+        or ""
+    )
+    # v1 ``input_parameters`` is a JSON-Schema dict with at least ``type`` and
+    # ``properties``; older variants used ``name``/``parameters``. Fall back to
+    # an empty object schema rather than dropping the tool.
+    params = getattr(tool, "input_parameters", None) or {}
+    if not isinstance(params, dict):
+        params = {}
+    parameters = {
+        "type": params.get("type", "object"),
+        "properties": params.get("properties", {}) or {},
+    }
+    required = params.get("required")
+    if required:
+        parameters["required"] = list(required)
+    return {
+        "name": slug,
+        "description": description,
+        "parameters": parameters,
+    }
+
+
 def get_app_schemas(app_name: str) -> list[dict]:
     """Return hermes-registry-shaped schemas for every action in *app_name*.
 
@@ -236,36 +277,34 @@ def get_app_schemas(app_name: str) -> list[dict]:
     if not _composio_available:
         return []
 
+    # Paginate the raw catalog endpoint. ``client.tools.list`` lives on the
+    # underlying ``composio_client`` HTTP resource, not on the high-level
+    # ``Tools`` wrapper — the wrapper's ``get()`` returns provider-shaped
+    # (e.g. OpenAI function-call) schemas, but we need the raw ``Tool`` rows
+    # so we can map them into the hermes registry shape ourselves.
+    tools: list = []
+    cursor: str | None = None
     try:
-        from composio import App  # type: ignore[import-not-found]
-        app = App(key)
-        action_models = _toolset.get_action_schemas(
-            apps=[app],
-            check_connected_accounts=False,
-        )
+        while True:
+            kwargs: dict[str, Any] = {"toolkit_slug": key, "limit": 100}
+            if cursor:
+                kwargs["cursor"] = cursor
+            page = _client.client.tools.list(**kwargs)
+            tools.extend(getattr(page, "items", None) or [])
+            cursor = getattr(page, "next_cursor", None)
+            if not cursor:
+                break
     except Exception:
         logger.exception("Failed to fetch Composio schemas for '%s'", key)
         _app_schema_cache[key] = []
         return []
 
     result: list[dict] = []
-    for action in action_models:
-        name = getattr(action, "name", None)
-        if not name:
+    for tool in tools:
+        schema = _schema_from_tool(tool)
+        if not schema:
             continue
-        params = getattr(action, "parameters", None)
-        schema = {
-            "name": name,
-            "description": getattr(action, "description", "") or "",
-            "parameters": {
-                "type": getattr(params, "type", "object") if params else "object",
-                "properties": getattr(params, "properties", {}) if params else {},
-            },
-        }
-        required = getattr(params, "required", None) if params else None
-        if required:
-            schema["parameters"]["required"] = list(required)
-        _action_map[name] = name
+        _action_map[schema["name"]] = schema["name"]
         result.append(schema)
 
     _app_schema_cache[key] = result
@@ -282,7 +321,7 @@ def is_composio_tool(tool_name: str) -> bool:
 
 
 def get_connected_apps(entity_id: str) -> set[str]:
-    """Set of app names this entity has active connections for (TTL-cached)."""
+    """Set of app names this user has active connections for (TTL-cached)."""
     _init()
     if not _composio_available:
         return set()
@@ -291,41 +330,59 @@ def get_connected_apps(entity_id: str) -> set[str]:
     if entry and (now - entry[0]) < CONNECTIONS_TTL:
         return entry[1]
     try:
-        entity = _toolset.get_entity(id=entity_id)
-        try:
-            connections = entity.get_connections() or []
-        except Exception:
-            _connected_apps_cache[entity_id] = (now, set())
-            return set()
-        apps: set[str] = set()
-        for conn in connections:
-            name = getattr(conn, "appUniqueId", None) or getattr(conn, "appName", None)
-            if name:
-                apps.add(name.lower())
-        _connected_apps_cache[entity_id] = (now, apps)
-        return apps
+        response = _client.connected_accounts.list(
+            user_ids=[entity_id],
+            statuses=["ACTIVE"],
+        )
     except Exception:
         logger.exception("Failed to list Composio connections for %s", entity_id)
         return set()
+
+    apps: set[str] = set()
+    for item in getattr(response, "items", None) or []:
+        toolkit = getattr(item, "toolkit", None)
+        slug = getattr(toolkit, "slug", None) if toolkit else None
+        if slug:
+            apps.add(slug.lower())
+    _connected_apps_cache[entity_id] = (now, apps)
+    return apps
 
 
 def invalidate_connections(entity_id: str) -> None:
     _connected_apps_cache.pop(entity_id, None)
 
 
-def initiate_connection(entity_id: str, app_name: str) -> str | None:
-    """Start OAuth for *app_name* under *entity_id*. Returns redirect URL."""
+def initiate_connection(entity_id: str, app_name: str) -> tuple[str | None, str | None]:
+    """Start OAuth for *app_name* under *entity_id*.
+
+    Returns ``(redirect_url, error)``. On success ``error`` is ``None``;
+    on failure ``redirect_url`` is ``None`` and ``error`` carries the
+    Composio exception message so the handler can surface a real error
+    (instead of the old swallowed-to-None contract that produced the
+    misleading "check COMPOSIO_API_KEY" message).
+    """
     _init()
     if not _composio_available:
-        return None
+        return None, "Composio is not configured (set COMPOSIO_API_KEY)."
     try:
-        entity = _toolset.get_entity(id=entity_id)
-        connection = entity.initiate_connection(app_name=app_name)
+        # toolkits.authorize() finds or auto-creates a Composio-managed auth
+        # config for the toolkit, so callers don't have to provision one in
+        # the dashboard before connecting.
+        request = _client.toolkits.authorize(
+            user_id=str(entity_id),
+            toolkit=app_name,
+        )
         invalidate_connections(entity_id)
-        return getattr(connection, "redirectUrl", None)
-    except Exception:
+        url = getattr(request, "redirect_url", None)
+        if not url:
+            return None, (
+                f"Composio returned no redirect URL for '{app_name}'. "
+                "Check the app slug is valid (gmail, googlecalendar, slack, ...)."
+            )
+        return url, None
+    except Exception as exc:
         logger.exception("Failed to initiate %s connection for %s", app_name, entity_id)
-        return None
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def check_connection(entity_id: str, app_name: str) -> bool:
@@ -333,11 +390,14 @@ def check_connection(entity_id: str, app_name: str) -> bool:
     if not _composio_available:
         return False
     try:
-        entity = _toolset.get_entity(id=entity_id)
-        entity.get_connection(app=app_name)
-        return True
+        response = _client.connected_accounts.list(
+            user_ids=[str(entity_id)],
+            toolkit_slugs=[app_name],
+            statuses=["ACTIVE"],
+        )
     except Exception:
         return False
+    return bool(getattr(response, "items", None))
 
 
 # ----- execution -------------------------------------------------------------
@@ -358,21 +418,24 @@ def execute(tool_name: str, args: dict, entity_id: str) -> tuple[bool, str]:
 
     params = {k: v for k, v in (args or {}).items() if not k.startswith("_")}
     try:
-        result = _toolset.execute_action(
-            action=tool_name,
-            params=params,
-            entity_id=str(entity_id),
+        result = _client.tools.execute(
+            slug=tool_name,
+            arguments=params,
+            user_id=str(entity_id),
         )
     except Exception as e:
         logger.exception("Composio tool %s failed", tool_name)
         return False, f"Error executing {tool_name}: {e}"
 
+    # v1 ToolExecutionResponse is a TypedDict subclass of dict with keys
+    # ``data``, ``error``, ``successful``.
     if isinstance(result, dict):
-        if result.get("error"):
-            return False, f"Error: {result['error']}"
-        if result.get("successfull") is False or result.get("successful") is False:
+        successful = result.get("successful")
+        if successful is False:
             err = result.get("error") or result.get("data") or "Unknown error"
             return False, f"Error: {tool_name} failed — {err}"
+        if result.get("error"):
+            return False, f"Error: {result['error']}"
         payload = result.get("data", result)
     else:
         payload = result
