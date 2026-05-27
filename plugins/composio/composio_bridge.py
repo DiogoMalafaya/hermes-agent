@@ -277,23 +277,8 @@ def get_app_schemas(app_name: str) -> list[dict]:
     if not _composio_available:
         return []
 
-    # Paginate the raw catalog endpoint. ``client.tools.list`` lives on the
-    # underlying ``composio_client`` HTTP resource, not on the high-level
-    # ``Tools`` wrapper — the wrapper's ``get()`` returns provider-shaped
-    # (e.g. OpenAI function-call) schemas, but we need the raw ``Tool`` rows
-    # so we can map them into the hermes registry shape ourselves.
-    tools: list = []
-    cursor: str | None = None
     try:
-        while True:
-            kwargs: dict[str, Any] = {"toolkit_slug": key, "limit": 100}
-            if cursor:
-                kwargs["cursor"] = cursor
-            page = _client.client.tools.list(**kwargs)
-            tools.extend(getattr(page, "items", None) or [])
-            cursor = getattr(page, "next_cursor", None)
-            if not cursor:
-                break
+        tools = _client.tools.get_raw_composio_tools(toolkits=[key])
     except Exception:
         logger.exception("Failed to fetch Composio schemas for '%s'", key)
         _app_schema_cache[key] = []
