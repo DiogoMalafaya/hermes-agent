@@ -127,7 +127,13 @@ def _init() -> None:
 
     try:
         from composio import Composio  # type: ignore[import-not-found]
-        _client = Composio(api_key=api_key)
+        # toolkit_versions="latest" pins every toolkit call to the most recent
+        # action contract. Without it, composio 0.13+ raises
+        # ToolVersionRequiredError on every tools.execute() call ("Toolkit
+        # version not specified."). We're not in a position to pin individual
+        # action versions per toolkit — the agent discovers actions
+        # dynamically — so the "latest" default matches our discovery model.
+        _client = Composio(api_key=api_key, toolkit_versions="latest")
         _composio_available = True
         logger.info("Composio v1 client initialized")
     except ImportError:
