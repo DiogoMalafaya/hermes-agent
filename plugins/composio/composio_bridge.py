@@ -409,10 +409,20 @@ def execute(tool_name: str, args: dict, entity_id: str) -> tuple[bool, str]:
 
     params = {k: v for k, v in (args or {}).items() if not k.startswith("_")}
     try:
+        # dangerously_skip_version_check is required because the SDK rejects
+        # an effective version of "latest" (the toolkit_versions="latest"
+        # default we set at client init) unless callers explicitly opt in.
+        # See composio/core/models/tools.py:_execute_tool — line 31 raises
+        # ToolVersionRequiredError when version == "latest" without the flag.
+        # The docstring on Composio(toolkit_versions=...) calls "latest" the
+        # default, but in practice it's the trigger for that exception.
+        # Hermes registers actions dynamically so we always want the current
+        # contract; accepting the upstream-break risk is correct here.
         result = _client.tools.execute(
             slug=tool_name,
             arguments=params,
             user_id=str(entity_id),
+            dangerously_skip_version_check=True,
         )
     except Exception as e:
         logger.exception("Composio tool %s failed", tool_name)
