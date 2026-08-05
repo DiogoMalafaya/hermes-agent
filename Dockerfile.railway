@@ -19,11 +19,23 @@ COPY --chmod=0755 --from=caddy_source /usr/bin/caddy /usr/local/bin/caddy
 
 WORKDIR /opt/hermes
 
-# --- npm: top-level deps (root + Playwright host) -----------------------------
-# Split so an unrelated change (web deps, source code) does NOT re-trigger the
-# 5-minute Playwright chromium download. Only re-runs when the root
-# package-lock.json changes.
+# --- npm: workspace deps (root + web + Playwright host) ----------------------
+# Root package.json declares "web" as an npm workspace. This used to be two
+# layers (root install, then a separate `cd web && npm install` against its
+# own web/package-lock.json) so web-only dependency churn wouldn't invalidate
+# the slow Playwright layer below. Upstream consolidated all per-workspace
+# lockfiles into a single root package-lock.json and deleted
+# web/package-lock.json (a51a7b9b9) — installing from within a workspace
+# member now resolves through the root lockfile too, so there is no longer a
+# separate web lockfile to split the cache on. One install now covers both.
+#
+# web/package.json is copied ahead of the full `COPY . .` purely so this
+# layer stays cached across source-only changes. apps/shared/ is copied IN
+# FULL (not just its manifest) because web/package.json references it as a
+# `file:` workspace dependency, so npm needs real content to resolve it.
 COPY package.json package-lock.json ./
+COPY web/package.json web/
+COPY apps/shared/ apps/shared/
 RUN npm install --prefer-offline --no-audit && npm cache clean --force
 
 # --- playwright chromium ------------------------------------------------------
@@ -33,12 +45,6 @@ RUN npm install --prefer-offline --no-audit && npm cache clean --force
 # libs were renamed with t64 suffixes); only the apt-install round-trip is
 # spent on cache misses, and `--only-shell` keeps the chromium download minimal.
 RUN npx playwright install --with-deps chromium --only-shell
-
-# --- web (dashboard) deps -----------------------------------------------------
-# Separate from root deps so web/package-lock.json churn doesn't invalidate
-# the Playwright layer above.
-COPY web/package.json web/package-lock.json web/
-RUN cd web && npm install --prefer-offline --no-audit && npm cache clean --force
 
 COPY --chown=hermes:hermes . .
 
