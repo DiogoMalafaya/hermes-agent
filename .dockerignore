@@ -40,6 +40,10 @@ ui-tui/packages/hermes-ink/dist/
 # Environment files
 .env
 .env.*
+# .env.example is a template (no real secrets, values are commented out) that
+# docker/railway-launcher.sh copies into the data volume as the seed .env on
+# first boot — it must survive the .env.* exclusion above.
+!.env.example
 
 # IDE
 .vscode/
@@ -54,6 +58,9 @@ htmlcov/
 
 # Documentation
 *.md
+# docker/SOUL.md is a runtime asset (docker/railway-launcher.sh seeds it into
+# the data volume on first boot), not documentation — must survive *.md above.
+!docker/SOUL.md
 
 # Runtime data (bind-mounted at /opt/data; must not leak into build context)
 data/
@@ -101,7 +108,8 @@ plans/
 acp_registry/
 
 # Repo-level dotfiles that are git-only or dev-tooling config
-.env.example
+# (.env.example is intentionally NOT listed here — see the negation in the
+# "Environment files" section above; the launcher needs it at runtime.)
 .envrc
 .gitattributes
 .hadolint.yaml
